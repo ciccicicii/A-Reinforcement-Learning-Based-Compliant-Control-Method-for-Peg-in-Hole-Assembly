@@ -122,6 +122,57 @@ SL_F_THRESH = slice(16, 17)
 SL_PREV_ACT = slice(17, 24)
 
 
+def install_terminal_snapshot(unwrapped, success_threshold):
+    """在环境内部、自动复位**之前**捕获本步终态（审查要求）。
+
+    DirectRLEnv.step 的顺序是：_get_dones → _get_rewards → _reset_idx → 观测。
+    挂接 _get_rewards 即可在复位前读到：
+        几何成功、平滑接触力、当回合力阈值、回合内步号、done 标志。
+    若复位发生，返回的观测属于下一场景，不能用于判定本次尝试。
+    """
+    snapshot = {"valid": False}
+    orig = unwrapped._get_rewards
+
+    def hooked():
+        rew = orig()
+        try:
+            snapshot["success"] = bool(
+                unwrapped._get_curr_successes(success_threshold=success_threshold, check_rot=False)[0]
+            )
+            snapshot["force"] = [float(v) for v in unwrapped.force_sensor_smooth[0, 0:3].tolist()]
+            snapshot["threshold"] = float(unwrapped.contact_penalty_thresholds[0])
+            snapshot["episode_step"] = int(unwrapped.episode_length_buf[0])
+            snapshot["terminated"] = bool(unwrapped.reset_terminated[0])
+            snapshot["truncated"] = bool(unwrapped.reset_time_outs[0])
+            snapshot["valid"] = True
+        except Exception:  # 快照失败不阻断控制，但会被标记无效
+            snapshot["valid"] = False
+        return rew
+
+    unwrapped._get_rewards = hooked
+    return snapshot
+
+
+def reset_interval_clocks(unwrapped):
+    """把区间事件（FORGE 死区每 2 s 重随机）的倒计时按回合重置。
+
+    EventManager 的 _interval_term_time_left 只在构造时采样一次，之后只递减，
+    复位时不重置 —— 因此上一回合跑多长，会改变下一回合的第一个死区事件时刻
+    （审查探针实测：开局距下次事件 1.333 s vs 0.999 s）。这里每回合设为区间中点，
+    固定区间（FORGE 为 (2, 2)）时即精确等于该值。
+    """
+    em = getattr(unwrapped, "event_manager", None)
+    if em is None or "interval" not in getattr(em, "available_modes", []):
+        return []
+    values = []
+    for i, term_cfg in enumerate(em._mode_term_cfgs["interval"]):
+        lower, upper = term_cfg.interval_range_s
+        value = 0.5 * (lower + upper)
+        em._interval_term_time_left[i][:] = value
+        values.append(value)
+    return values
+
+
 def make_action(target_rel: torch.Tensor, prev_actions: torch.Tensor) -> torch.Tensor:
     action = torch.zeros(1, 7, device=target_rel.device)
     action[:, 0:3] = torch.clamp(target_rel / POS_ACTION_SCALE, -1.0, 1.0)
@@ -167,6 +218,9 @@ def main():
     }
     print(f"[INFO]: 脚本 SHA-256[:16]={script_sha}  Isaac Lab={run_config['isaac_lab_version']}")
 
+    # 终态快照挂接 + 区间时钟重置（复审要求）
+    terminal_snap = install_terminal_snapshot(unwrapped, success_threshold)
+
     print(f"[INFO]: 三阶段基线，回合 {args_cli.episodes}，种子 {args_cli.seed}，导纳方向 sign={args_cli.c_sign:+.0f}（未验证）")
     print(
         f"[INFO]: A判据 {args_cli.xy_tol*1000:.1f}mm×{args_cli.hold_steps}步 → "
@@ -188,12 +242,19 @@ def main():
         else:
             ep_seed = -1
         obs, _ = env.reset()
+        # 区间事件时钟按回合重置：避免上一回合长度改变本回合的死区事件时刻（复审要求）
+        interval_clocks = reset_interval_clocks(unwrapped) if not args_cli.no_reseed else []
+        # 复位后再次按回合号播种：使本回合运行期随机（死区抽样、观测噪声）只依赖回合号
+        if not args_cli.no_reseed:
+            unwrapped.seed(ep_seed + 1)
+
         policy_obs = obs["policy"][0]
         rel = policy_obs[SL_REL].clone()
         prev_actions = policy_obs[SL_PREV_ACT].clone()
         f_thresh = float(policy_obs[SL_F_THRESH].item())
         f_thresh_prev = f_thresh  # 边界守卫：阈值只在复位时重抽
         boundary_violations = 0
+        dz_events = []  # 阈值重抽发生的步号（复位标记；延长时限后应为空）
         f_xyz = torch.zeros(3, device=rel.device)  # 上一步力（首步为零)
 
         # 复位指纹（审查要求）：覆盖销/孔/末端真实位姿、力阈值、增益、EMA 与死区，
@@ -212,6 +273,7 @@ def main():
                 else None
             ),
             "episode_length_buf": int(unwrapped.episode_length_buf[0]),
+            "interval_clocks_s": interval_clocks,
         }
         fingerprints.append(fingerprint)
         # CSV 内只留紧凑字符串，完整指纹写入 config json
@@ -324,14 +386,10 @@ def main():
             tgt_z = z_cmd
 
             # ============ 3. 记录并下发 ============
-            # 步进前先取一次成功判据：若本步触发环境 done，复位后状态不可信，
-            # 用步进前（即复位前）的值作为终态判据（审查要求"自动复位前保存终态判据"）。
-            success_pre = bool(
-                unwrapped._get_curr_successes(success_threshold=success_threshold, check_rot=False)[0]
-            )
             action = make_action(
                 torch.tensor([tgt_x, tgt_y, tgt_z], device=rel.device), prev_actions
             )
+            terminal_snap["valid"] = False  # 清空，等待本步在环境内部写入
             obs, rew, terminated, truncated, info = env.step(action)
             is_done = bool(terminated[0]) or bool(truncated[0])
 
@@ -345,27 +403,35 @@ def main():
             applied = unwrapped.actions[0, 0:3].detach().clone()
             xy_err = torch.linalg.norm(rel[0:2]).item()
 
-            # 边界守卫：环境在窗口内自动复位（force_threshold 只在复位时重抽）。
-            # 延长时限后不应发生；若发生，说明本次试验混入了多个初始条件，必须作废该回合。
-            note = ""
-            if abs(f_thresh - f_thresh_prev) > 1e-6:
-                boundary_violations += 1
-                note = "boundary_violation"
-                status = "INVALID"
+            # 阈值变化 = 环境重抽（复位时）。记录首次触发步，供与审查探针的时刻对照
+            threshold_changed = abs(f_thresh - f_thresh_prev) > 1e-6
+            if threshold_changed:
+                dz_events.append(step)
             f_thresh_prev = f_thresh
 
-            if not note:
-                if is_done:
-                    # 环境到点（不应发生，除非 --keep_official_limit）：观测已被复位，
-                    # 用复位前的终态判据（success_pre）判定，并如实标记 ENV_DONE。
-                    status = "SUCCESS" if success_pre else "ENV_DONE"
-                    note = "success_at_env_done" if success_pre else "env_done"
-                elif success := bool(
-                    unwrapped._get_curr_successes(success_threshold=success_threshold, check_rot=False)[0]
-                ):
-                    status, note = "SUCCESS", "success"
-                elif f_norm > f_thresh:
-                    status, note = "FORCE_ABORT", "force_over_threshold"
+            note = ""
+            if is_done:
+                # 环境正常到时/终止：复位后的观测不可用，改用环境内快照（复位前状态）。
+                if terminal_snap.get("valid", False):
+                    term_success = bool(terminal_snap["success"])
+                    term_force = terminal_snap["force"]
+                    f_xyz = torch.tensor(term_force, device=rel.device)
+                    f_norm = float(torch.linalg.norm(f_xyz).item())
+                    max_force = max(max_force, f_norm)
+                    status = "SUCCESS" if term_success else "ENV_DONE"
+                    note = "success_at_env_done" if term_success else "env_done"
+                else:
+                    status, note = "ENV_DONE", "env_done_no_snapshot"
+            elif threshold_changed:
+                # 非 done 步出现阈值变化 = 窗口内被静默复位，该次试验无效
+                boundary_violations += 1
+                status, note = "INVALID", "boundary_violation"
+            elif success := bool(
+                unwrapped._get_curr_successes(success_threshold=success_threshold, check_rot=False)[0]
+            ):
+                status, note = "SUCCESS", "success"
+            elif f_norm > f_thresh:
+                status, note = "FORCE_ABORT", "force_over_threshold"
 
             rows.append(
                 {
@@ -414,6 +480,8 @@ def main():
                 "max_force": round(max_force, 3),
                 "neg_fz_events": neg_fz_events,
                 "boundary_violations": boundary_violations,
+                "reset_events": dz_events,  # 阈值重抽步号；延长时限后应为空
+                "interval_clocks_s": interval_clocks,
                 "reset_fp": reset_fingerprint,
                 "steps": len(rows) - rows_ep_start,
             }

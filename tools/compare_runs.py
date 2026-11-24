@@ -36,12 +36,19 @@ def load(path):
 
 
 def outcome(rows):
+    """回合结局。success_at_env_done 计为成功（终态在复位前判定）。"""
     note = rows[-1].get("note", "")
-    if note == "success":
+    if note in ("success", "success_at_env_done"):
         return "OK"
     if note == "force_over_threshold":
         return "ABORT"
-    return "TIMEOUT"
+    if note in ("env_done", "env_done_no_snapshot"):
+        return "END"
+    if note in ("boundary_violation",):
+        return "INVALID"
+    if note == "":
+        return "UNTERMINATED"
+    return "OTHER"
 
 
 def init_state(rows):
@@ -61,11 +68,12 @@ def boundary_violations(eps):
 
 def stats(eps):
     n = len(eps)
-    c = {"OK": 0, "ABORT": 0, "TIMEOUT": 0}
+    c = defaultdict(int)
     steps_ok, maxf = [], []
     for rows in eps.values():
-        c[outcome(rows)] += 1
-        if outcome(rows) == "OK":
+        o = outcome(rows)
+        c[o] += 1
+        if o == "OK":
             steps_ok.append(int(rows[-1]["step"]))
         maxf.append(max(math.hypot(float(r["F_x"]), float(r["F_y"]), float(r["F_z"])) for r in rows))
     return {
@@ -73,7 +81,8 @@ def stats(eps):
         "success": c["OK"],
         "rate": 100.0 * c["OK"] / n if n else 0.0,
         "abort": c["ABORT"],
-        "timeout": c["TIMEOUT"],
+        "timeout": c["END"] + c["TIMEOUT"],
+        "invalid": c["INVALID"] + c["UNTERMINATED"] + c["OTHER"],
         "mean_steps_ok": (sum(steps_ok) / len(steps_ok)) if steps_ok else None,
         "mean_max_force": sum(maxf) / len(maxf) if maxf else 0.0,
     }
@@ -123,13 +132,19 @@ def main():
     ap.add_argument("--label-a", default="A")
     ap.add_argument("--label-b", default="B")
     ap.add_argument("--tol", type=float, default=1e-3, help="判定同一初态的坐标容差 [m]。")
+    ap.add_argument("--allow_loose", action="store_true", default=False,
+                    help="缺少完整指纹时允许退化为首步观测比对（仅作描述，不作为严格配对认证）。")
     args = ap.parse_args()
 
     a, b = load(args.csv_a), load(args.csv_b)
 
-    # ---------- 1. 配置与配对性检查 ----------
+    # ---------- 0. 自比较与文件健全性 ----------
     refuse = []
     print("=" * 68)
+    if os.path.abspath(args.csv_a) == os.path.abspath(args.csv_b):
+        refuse.append("同一份数据与自身比较（不构成对照）")
+
+    # ---------- 1. 配置与配对性检查 ----------
     print("配置快照")
     cfgs = {}
     for tag, path in (("A", args.csv_a), ("B", args.csv_b)):
@@ -154,6 +169,28 @@ def main():
         print(f"  CLI 差异（忽略输出路径）：{diffs if diffs else '无'}")
         if len(diffs) > 1:
             refuse.append(f"配置差异不止一项（{len(diffs)} 项），不构成单因素对照")
+        # 时间口径必须一致（复审实测：control_dt_s 不同仍被放行）
+        for key in ("episode_length_s", "control_dt_s", "max_episode_length_steps"):
+            va, vb = cfgs["A"].get(key), cfgs["B"].get(key)
+            if va != vb:
+                refuse.append(f"时间口径不一致：{key} = {va} vs {vb}")
+
+    # ---------- 1a. 数据健全性：终止完整性、mid-done、无效/未终止 ----------
+    for tag, eps in (("A", a), ("B", b)):
+        bad_term = [ep for ep, rows in eps.items() if rows[-1].get("note", "") == ""]
+        mid_done = []
+        for ep, rows in eps.items():
+            for i, r in enumerate(rows[:-1]):
+                if r.get("done", "0") in ("1", 1):
+                    mid_done.append((ep, i))
+                    break
+        invalid = [ep for ep, rows in eps.items() if outcome(rows) in ("INVALID", "UNTERMINATED", "OTHER")]
+        if bad_term:
+            refuse.append(f"[{tag}] 存在未终止回合（末行无终止标签）：{bad_term[:5]}")
+        if mid_done:
+            refuse.append(f"[{tag}] 存在回合中途 done=1 的记录（边界异常）：{mid_done[:5]}")
+        if invalid:
+            refuse.append(f"[{tag}] 存在无效/未知结局回合：{invalid[:5]}")
 
     # 回合集合完整性
     if len(a) != len(b):
@@ -182,14 +219,18 @@ def main():
     fp_b = (cfgs.get("B") or {}).get("reset_fingerprints")
     unpaired = []
     if fp_a and fp_b and len(fp_a) >= len(a) and len(fp_b) >= len(b):
-        # 完整指纹比对（销/孔/末端真值、力阈值、增益、EMA、死区）
+        # 完整指纹比对（销/孔/末端真值、力阈值、增益、EMA、死区、事件时钟）
         unpaired = [ep for ep in common if fp_a[ep] != fp_b[ep]]
         mode = "完整指纹"
-    else:
-        # 退化为首步观测比对
+    elif args.allow_loose:
         unpaired = [ep for ep in common
                     if any(abs(x - y) > args.tol for x, y in zip(init_state(a[ep]), init_state(b[ep])))]
-        mode = "首步观测（无指纹快照）"
+        mode = "首步观测（宽松模式，仅 1 mm×3 轴）"
+        refuse.append("缺少完整指纹，配对性未经严格认证（--allow_loose 已显式放宽）")
+    else:
+        unpaired = list(common)
+        mode = "缺少完整指纹"
+        refuse.append("缺少完整指纹快照，拒绝认证严格配对（如需仅作描述，请加 --allow_loose）")
     print("-" * 68)
     print(f"配对性检查（{mode}）：共同回合 {len(common)}，初态不一致 {len(unpaired)}")
     if unpaired:
@@ -232,11 +273,43 @@ def main():
         if flips:
             print("  变化回合: " + "；".join(flips))
 
+        # 首个分叉步（复审要求：若仍有首个差异，沿该步追查）
+        trace_cols = ("phase", "obs_x", "obs_y", "obs_z", "tgt_x", "tgt_y", "tgt_z",
+                      "F_x", "F_y", "F_z", "z_cmd", "applied_x", "applied_y", "applied_z")
+        print("-" * 68)
+        print("逐回合首个分叉步（相同控制输入下应逐步一致）")
+        any_divergence = False
+        for ep in common:
+            ra, rb = a[ep], b[ep]
+            n = min(len(ra), len(rb))
+            found = None
+            for i in range(n):
+                for c in trace_cols:
+                    va, vb = ra[i].get(c), rb[i].get(c)
+                    if va is None or vb is None:
+                        continue
+                    try:
+                        differ = abs(float(va) - float(vb)) > 1e-6
+                    except ValueError:
+                        differ = va != vb
+                    if differ:
+                        found = (i, c, va, vb)
+                        break
+                if found:
+                    break
+            if found:
+                any_divergence = True
+                print(f"  EP{ep:02d}: 首个分叉在第 {found[0]} 步，列 {found[1]}：{found[2]} vs {found[3]}")
+        if not any_divergence:
+            print("  全部共同回合逐列一致（无分叉）")
+
         # McNemar（仅比较 OK / 非OK 的配对）
         b_ = sum(1 for ep in common if outcome(a[ep]) == "OK" and outcome(b[ep]) != "OK")
         c_ = sum(1 for ep in common if outcome(a[ep]) != "OK" and outcome(b[ep]) == "OK")
         print("-" * 68)
-        if not unpaired and b_ + c_:
+        if b_ == 0 and c_ == 0:
+            print("配对标签完全一致：不一致对为 0，不做显著性检验。")
+        elif not unpaired and b_ + c_:
             p = exact_mcnemar(b_, c_)
             print(f"配对 McNemar（成功 vs 非成功）：{args.label_a}独成 {b_} 例，{args.label_b}独成 {c_} 例，p≈{p:.3f}")
         else:
