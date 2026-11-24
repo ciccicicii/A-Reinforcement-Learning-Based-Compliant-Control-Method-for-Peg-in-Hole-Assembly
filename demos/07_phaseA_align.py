@@ -42,6 +42,12 @@ parser.add_argument("--mode", type=str, default="align", choices=["align", "cali
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments.")
 parser.add_argument("--episodes", type=int, default=20, help="Number of episodes.")
 parser.add_argument("--max_steps", type=int, default=200, help="Max control steps per episode.")
+parser.add_argument(
+    "--keep_official_limit",
+    action="store_true",
+    default=False,
+    help="使用官方 10 s 时限；默认延长到覆盖 --max_steps，避免窗口跨越环境自动复位。",
+)
 parser.add_argument("--xy_tol", type=float, default=0.002, help="Lateral tolerance for alignment [m].")
 parser.add_argument("--hold_steps", type=int, default=10, help="Consecutive in-tolerance steps to count as converged.")
 parser.add_argument("--contact_alert", type=float, default=1.0, help="|F| alert level during align mode [N].")
@@ -92,7 +98,16 @@ def make_action(target_rel: torch.Tensor, prev_actions: torch.Tensor) -> torch.T
 def main():
     env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs)
     env_cfg.seed = args_cli.seed
+    # 回合时限：环境默认 10 s（约 150 控制步）会自动复位。200 步的窗口会跨 2 个环境回合，
+    # 把不同初态之间的跳变误当成"对中漂移"。默认延长到覆盖整个窗口。
+    control_dt = env_cfg.sim.dt * env_cfg.decimation
+    if not args_cli.keep_official_limit:
+        env_cfg.episode_length_s = args_cli.max_steps * control_dt + 1.0
     env = gym.make(args_cli.task, cfg=env_cfg)
+    print(
+        f"[INFO]: 回合时限 {env_cfg.episode_length_s:.1f} s（控制 dt={control_dt*1000:.1f} ms）"
+        + ("" if args_cli.keep_official_limit else "｜**已修改任务时限，非官方默认**")
+    )
     unwrapped = env.unwrapped
 
     print(f"[INFO]: 模式 {args_cli.mode}，回合 {args_cli.episodes}，种子 {args_cli.seed}")

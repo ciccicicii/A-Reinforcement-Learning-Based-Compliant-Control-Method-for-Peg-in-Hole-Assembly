@@ -49,6 +49,16 @@ def init_state(rows):
     return (float(r["obs_x"]), float(r["obs_y"]), float(r["obs_z"]))
 
 
+def boundary_violations(eps):
+    """检测窗口内是否发生环境自动复位（force_threshold 只在复位时重抽）。"""
+    bad = []
+    for ep, rows in eps.items():
+        thr = [float(r["force_threshold"]) for r in rows]
+        if any(abs(a - b) > 1e-6 for a, b in zip(thr, thr[1:])):
+            bad.append(ep)
+    return bad
+
+
 def stats(eps):
     n = len(eps)
     c = {"OK": 0, "ABORT": 0, "TIMEOUT": 0}
@@ -129,6 +139,19 @@ def main():
             print(f"  {tag}: SHA={j.get('script_sha256_16')}  episodes={cli.get('episodes')} seed={cli.get('seed')}")
         else:
             print(f"  {tag}: 无配置快照")
+
+    # ---------- 1b. 回合边界检查 ----------
+    bad_a, bad_b = boundary_violations(a), boundary_violations(b)
+    print("-" * 68)
+    print(f"回合边界检查：A 窗口内自动复位 {len(bad_a)} 个回合，B {len(bad_b)} 个")
+    if bad_a or bad_b:
+        print("  ⚠ 窗口内发生环境自动复位（force_threshold 重抽），该轮不是「一次试验=一个初始条件」。")
+        print("  ⚠ 成功率是「含成功状态的窗口数」，不是尝试成功率；任何比较结论不成立。")
+        print(f"  A 受影响回合：{bad_a[:10]}{' ...' if len(bad_a) > 10 else ''}")
+        print(f"  B 受影响回合：{bad_b[:10]}{' ...' if len(bad_b) > 10 else ''}")
+        print("  修复：脚本默认延长 episode_length_s（非 --keep_official_limit），需重跑两轮。")
+    else:
+        print("  ✔ 两轮均为单一初始条件的连续试验。")
 
     common = sorted(set(a) & set(b))
     unpaired = [ep for ep in common if any(abs(x - y) > args.tol for x, y in zip(init_state(a[ep]), init_state(b[ep])))]

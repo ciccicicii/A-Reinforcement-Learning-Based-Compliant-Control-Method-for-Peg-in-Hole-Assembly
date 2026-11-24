@@ -36,6 +36,12 @@ parser.add_argument("--task", type=str, default="Isaac-Forge-PegInsert-Direct-v0
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments.")
 parser.add_argument("--episodes", type=int, default=10, help="Number of episodes to evaluate.")
 parser.add_argument("--max_steps", type=int, default=400, help="Max control steps per episode.")
+parser.add_argument(
+    "--keep_official_limit",
+    action="store_true",
+    default=False,
+    help="使用官方 10 s 时限（约 150 控制步）；默认延长到覆盖 --max_steps，保证单一初始条件。",
+)
 parser.add_argument("--xy_tol", type=float, default=0.002, help="Lateral tolerance to start descending [m].")
 parser.add_argument("--depth", type=float, default=0.03, help="Constant insertion target depth below hole top [m].")
 parser.add_argument("--force_limit", type=float, default=None, help="Abort episode if |F| exceeds this [N]. Defaults to force_threshold.")
@@ -84,7 +90,16 @@ def get_success(unwrapped, success_threshold: float) -> bool:
 
 def main():
     env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs)
+    # 回合时限：环境默认 10 s（约 150 控制步），到点会自动复位。若不同组使用不同预算，
+    # 必须显式延长 env 时限，保证"一次试验 = 一个初始条件"且各组的物理时间预算一致。
+    control_dt = env_cfg.sim.dt * env_cfg.decimation
+    if not args_cli.keep_official_limit:
+        env_cfg.episode_length_s = args_cli.max_steps * control_dt + 1.0
     env = gym.make(args_cli.task, cfg=env_cfg)
+    print(
+        f"[INFO]: 回合时限 {env_cfg.episode_length_s:.1f} s（控制 dt={control_dt*1000:.1f} ms）"
+        + ("" if args_cli.keep_official_limit else "｜**已修改任务时限，非官方默认**")
+    )
     unwrapped = env.unwrapped
 
     success_threshold = env_cfg.task.success_threshold

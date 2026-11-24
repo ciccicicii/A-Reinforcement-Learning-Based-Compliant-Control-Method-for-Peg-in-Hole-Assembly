@@ -50,6 +50,15 @@ parser.add_argument("--neg_fz_alert", type=float, default=-0.5, help="Count F_z 
 parser.add_argument("--c_enable", action="store_true", help="Enable Phase-C (default OFF: spiral-only C was 0/7 with 3 aborts in the 30-episode run).")
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 parser.add_argument(
+    "--keep_official_limit",
+    action="store_true",
+    default=False,
+    help=(
+        "使用官方 10 s 回合时限（约 150 控制步）。默认会延长到覆盖 --max_steps，"
+        "否则环境到点自动复位，脚本将跨复位继续执行（一次试验混入多个初始条件）。"
+    ),
+)
+parser.add_argument(
     "--no_reseed",
     action="store_true",
     default=False,
@@ -126,9 +135,25 @@ def make_action(target_rel: torch.Tensor, prev_actions: torch.Tensor) -> torch.T
 def main():
     env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs)
     env_cfg.seed = args_cli.seed
+
+    # ---- 回合时限：显式延长到覆盖外层预算（审查要求） ----
+    # 官方 FORGE 时限 10 s（约 150 个控制步），环境到点会自动复位并返回复位后的观测。
+    # 若脚本不在 done 时刻停止，就会"跨复位"继续执行（旧版 08 即如此：每个窗口含约 4 个
+    # 环境回合）。这里把 env 自身的时限设到外层预算之外，保证"一次试验 = 一个初始条件"。
+    control_dt = env_cfg.sim.dt * env_cfg.decimation
+    official_episode_s = env_cfg.episode_length_s
+    if not args_cli.keep_official_limit:
+        env_cfg.episode_length_s = args_cli.max_steps * control_dt + 1.0
+
     env = gym.make(args_cli.task, cfg=env_cfg)
     unwrapped = env.unwrapped
     success_threshold = env_cfg.task.success_threshold
+    max_ep_len = int(round(env_cfg.episode_length_s / control_dt))
+    print(
+        f"[INFO]: 控制 dt={control_dt*1000:.1f} ms；官方时限 {official_episode_s} s "
+        f"→ 本脚本时限 {env_cfg.episode_length_s:.1f} s（{max_ep_len} 步）"
+        + ("｜**已修改任务时限，非官方默认**" if not args_cli.keep_official_limit else "｜官方默认")
+    )
 
     # 版本快照（审查要求：CLI 参数 + 脚本哈希，写入 CSV 同目录 json）
     import hashlib
@@ -166,8 +191,17 @@ def main():
         rel = policy_obs[SL_REL].clone()
         prev_actions = policy_obs[SL_PREV_ACT].clone()
         f_thresh = float(policy_obs[SL_F_THRESH].item())
-        f_xyz = torch.zeros(3, device=rel.device)  # 上一步力（首步为零）
+        f_thresh_prev = f_thresh  # 边界守卫：阈值只在复位时重抽
+        boundary_violations = 0
+        f_xyz = torch.zeros(3, device=rel.device)  # 上一步力（首步为零)
 
+        # 复位指纹：该回合唯一的初始条件标识（审查要求的"场景指纹"最小集）
+        reset_fingerprint = (
+            f"seed={ep_seed}|thr={f_thresh:.4f}|"
+            f"init=({rel[0].item():+.4f},{rel[1].item():+.4f},{rel[2].item():+.4f})"
+        )
+
+        rows_ep_start = len(rows)  # 本回合在 rows 中的起点，用于统计步数
         init_xy = torch.linalg.norm(rel[0:2]).item()
         hold_z = rel[2].item()  # 复位高度（回退上限）
         z_cmd = hold_z
@@ -273,6 +307,7 @@ def main():
                 torch.tensor([tgt_x, tgt_y, tgt_z], device=rel.device), prev_actions
             )
             obs, rew, terminated, truncated, info = env.step(action)
+            is_done = bool(terminated[0]) or bool(truncated[0])
 
             policy_obs = obs["policy"][0]
             rel = policy_obs[SL_REL].clone()
@@ -284,11 +319,25 @@ def main():
             applied = unwrapped.actions[0, 0:3].detach().clone()
             xy_err = torch.linalg.norm(rel[0:2]).item()
 
-            note = ""
-            if success := bool(unwrapped._get_curr_successes(success_threshold=success_threshold, check_rot=False)[0]):
-                status, note = "SUCCESS", "success"
-            elif f_norm > f_thresh:
-                status, note = "FORCE_ABORT", "force_over_threshold"
+            # 边界守卫：环境在窗口内自动复位（force_threshold 只在复位时重抽）。
+            # 延长时限后不应发生；若发生，说明本次试验混入了多个初始条件，必须作废该回合。
+            if abs(f_thresh - f_thresh_prev) > 1e-6:
+                boundary_violations += 1
+                note = "boundary_violation"
+                status = "INVALID"
+            f_thresh_prev = f_thresh
+
+            if not note:
+                if is_done:
+                    # 环境到点（不应发生，除非 --keep_official_limit）：观测已被复位，
+                    # 成功标志不可信，如实标记为 ENV_DONE 并终止本回合。
+                    status, note = "ENV_DONE", "env_done"
+                elif success := bool(
+                    unwrapped._get_curr_successes(success_threshold=success_threshold, check_rot=False)[0]
+                ):
+                    status, note = "SUCCESS", "success"
+                elif f_norm > f_thresh:
+                    status, note = "FORCE_ABORT", "force_over_threshold"
 
             rows.append(
                 {
@@ -306,6 +355,7 @@ def main():
                     "applied_z": round(applied[2].item(), 5),
                     "xy_err": round(xy_err, 6), "z_cmd": round(z_cmd, 6),
                     "spiral_r": round(spiral_r, 6), "neg_fz_events": neg_fz_events,
+                    "reset_fp": reset_fingerprint,
                     "note": note,
                 }
             )
@@ -334,6 +384,9 @@ def main():
                 "final_z_cmd": round(z_cmd, 5),
                 "max_force": round(max_force, 3),
                 "neg_fz_events": neg_fz_events,
+                "boundary_violations": boundary_violations,
+                "reset_fp": reset_fingerprint,
+                "steps": len(rows) - rows_ep_start,
             }
         )
         print(
@@ -358,6 +411,15 @@ def main():
     print(f"  阶段分布      : 进入B {reached_b}/{n}；接触 {contacted}/{n}；进入C {reached_c}/{reached_b if reached_b else '-'}")
     print(f"  平均最大接触力: {sum(r['max_force'] for r in summary)/n:.2f} N")
     print(f"  负F_z事件总数 : {sum(r['neg_fz_events'] for r in summary)}")
+    n_bad = sum(1 for r in summary if r["status"] in ("INVALID", "ENV_DONE"))
+    print(
+        f"  试验完整性    : 窗口内边界违规 {sum(r['boundary_violations'] for r in summary)} 次；"
+        f"无效回合 {n_bad}"
+        + ("  ⚠ 存在跨复位试验，结果不可用于比较" if n_bad else "  ✔ 每次试验均为单一初始条件")
+    )
+    run_config["episode_length_s"] = env_cfg.episode_length_s
+    run_config["control_dt_s"] = control_dt
+    run_config["max_episode_length_steps"] = max_ep_len
 
     csv_path = args_cli.csv
     if csv_path is None:
