@@ -1,0 +1,169 @@
+{
+  "script_sha256_16": "d875fe1ff7b29332",
+  "cli": {
+    "task": "Isaac-Forge-PegInsert-Direct-v0",
+    "num_envs": 1,
+    "episodes": 3,
+    "max_steps": 600,
+    "neg_fz_alert": -0.5,
+    "c_enable": false,
+    "seed": 42,
+    "keep_official_limit": false,
+    "no_reseed": false,
+    "xy_tol": 0.002,
+    "hold_steps": 10,
+    "descend_gate": 0.003,
+    "descend_step": 0.0005,
+    "z_min": -0.008,
+    "warn_ratio": 0.55,
+    "backoff_ratio": 0.75,
+    "backoff_dist": 0.003,
+    "c_trigger_steps": 30,
+    "c_xy_gate": 0.005,
+    "spiral_r0": 0.001,
+    "spiral_dr": 2e-05,
+    "spiral_rmax": 0.0025,
+    "spiral_omega_deg": 15.0,
+    "c_force_deadband": 0.8,
+    "c_k_force": 0.0008,
+    "c_max_corr": 0.001,
+    "c_max_offset": 0.005,
+    "c_max_total": 0.004,
+    "c_sign": 1.0,
+    "csv": null,
+    "debug_every": 0,
+    "enable_cameras": false,
+    "xr": false,
+    "device": "cuda:0",
+    "cpu": false,
+    "verbose": false,
+    "info": false,
+    "rendering_mode": null,
+    "kit_args": "",
+    "anim_recording_enabled": false,
+    "anim_recording_start_time": 0,
+    "anim_recording_stop_time": 10,
+    "headless": true,
+    "hide_ui": true,
+    "create_new_stage": false,
+    "physics_gpu": 0,
+    "active_gpu": 0
+  },
+  "isaac_lab_version": "0.47.2",
+  "episode_length_s": 41.0,
+  "reset_fingerprints": [
+    {
+      "seed": 42000,
+      "held_pos": [
+        0.6187,
+        0.02534,
+        0.05001
+      ],
+      "fixed_pos": [
+        0.60958,
+        0.02423,
+        0.00714
+      ],
+      "fingertip_pos": [
+        0.61804,
+        0.02578,
+        0.07993
+      ],
+      "force_threshold": 6.1609,
+      "task_prop_gains": [
+        568.8,
+        469.31,
+        680.54,
+        37.4,
+        23.62,
+        20.05
+      ],
+      "ema_factor": 0.0433,
+      "dead_zone": [
+        0.276,
+        2.704,
+        0.731,
+        0.756,
+        0.36,
+        0.276
+      ],
+      "episode_length_buf": 0
+    },
+    {
+      "seed": 42001,
+      "held_pos": [
+        0.64278,
+        -0.00518,
+        0.11567
+      ],
+      "fixed_pos": [
+        0.64609,
+        -0.0053,
+        0.07668
+      ],
+      "fingertip_pos": [
+        0.64266,
+        -0.00516,
+        0.14716
+      ],
+      "force_threshold": 6.11204,
+      "task_prop_gains": [
+        437.76,
+        740.02,
+        426.91,
+        23.7,
+        21.38,
+        32.81
+      ],
+      "ema_factor": 0.04991,
+      "dead_zone": [
+        3.482,
+        2.884,
+        2.706,
+        0.091,
+        0.417,
+        0.55
+      ],
+      "episode_length_buf": 0
+    },
+    {
+      "seed": 42002,
+      "held_pos": [
+        0.63682,
+        0.03825,
+        0.09193
+      ],
+      "fixed_pos": [
+        0.63573,
+        0.02368,
+        0.05836
+      ],
+      "fingertip_pos": [
+        0.63771,
+        0.03908,
+        0.1253
+      ],
+      "force_threshold": 6.62395,
+      "task_prop_gains": [
+        548.32,
+        683.48,
+        507.81,
+        33.52,
+        37.76,
+        23.95
+      ],
+      "ema_factor": 0.02673,
+      "dead_zone": [
+        1.723,
+        2.146,
+        0.981,
+        0.036,
+        0.949,
+        0.475
+      ],
+      "episode_length_buf": 0
+    }
+  ],
+  "control_dt_s": 0.06666666666666667,
+  "max_episode_length_steps": 615
+}
