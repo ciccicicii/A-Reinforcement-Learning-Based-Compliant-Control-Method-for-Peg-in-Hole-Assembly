@@ -1,0 +1,8 @@
+[INFO]: Completed setting up the environment...
+Traceback (most recent call last):
+  File "/home/mi/graduation_design/RL/demos/04_forge_baseline.py", line 199, in <module>
+    main()
+  File "/home/mi/graduation_design/RL/demos/04_forge_baseline.py", line 89, in main
+    force_limit = float(unwrapped.contact_penalty_thresholds[0].item())
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'ForgeEnv' object has no attribute 'contact_penalty_thresholds'

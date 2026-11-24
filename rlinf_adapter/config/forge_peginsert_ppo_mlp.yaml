@@ -1,0 +1,81 @@
+# ---------------------------------------------------------------------------
+# RLinf + FORGE PegInsert 残差任务（MLP-Policy + PPO）配置**模板**
+#
+# 重要：这是按 RLinf v0.4 文档结构写的模板，键名必须与安装版本的
+# examples/embodiment/config/maniskill_ppo_mlp.yaml 对齐后使用。
+# 做法：先 copy 官方 MLP 配置，再把 env / model / runner 三段按下面改，
+# 而不是直接拿本文件跑。
+# ---------------------------------------------------------------------------
+defaults:
+  - env/forge_peginsert@env.train
+  - env/forge_peginsert@env.eval
+  - model/mlp_policy@actor.model
+  - runner/ppo@runner
+  - _self_
+
+env:
+  train:
+    total_num_envs: 32
+    max_episode_steps: 150          # FORGE：10 s / (1/15 s) = 150 步
+    auto_reset: False
+    ignore_terminations: True       # Factory 系列只在超时时重置，不做提前终止
+    group_size: 1
+    use_rel_reward: False
+    reward_coef: 1.0
+    isaaclab:
+      # 与 rlinf/envs/sim/isaaclab/tasks/forge_peginsert.py 里注册的 id 一致
+      id: Isaac-Forge-PegInsert-Residual-v0
+      task_description: "insert the peg into the hole"
+      num_envs: 32
+  eval:
+    total_num_envs: 16
+    max_episode_steps: 150
+    auto_reset: False
+    ignore_terminations: True
+    group_size: 1
+    use_rel_reward: False
+    reward_coef: 1.0
+    isaaclab:
+      id: Isaac-Forge-PegInsert-Residual-v0
+      task_description: "insert the peg into the hole"
+      num_envs: 16
+
+actor:
+  model:
+    model_type: "mlp_policy"
+    policy_setup: "panda-qpos"
+    obs_dim: 19                     # = residual 任务的 policy 观测维度，见 02 脚本打印
+    action_dim: 2                   # 二维横向残差
+    num_action_chunks: 1
+    hidden_dim: 256
+    precision: "32"
+    add_value_head: True
+  optim:
+    lr: 3.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+
+rollout:
+  model:
+    model_type: "mlp_policy"
+    obs_dim: 19
+    action_dim: 2
+
+runner:
+  max_epochs: 1000
+  save_interval: 50
+  logger:
+    logger_backends: ["tensorboard"]
+    experiment_name: "forge_residual_ppo_mlp"
+
+algorithm:
+  # PPO 相关键名以 rlinf/reference/algorithms/ppo 为准
+  group_size: 1
+  normalize_advantages: True
+  kl_penalty: "kl"
+  clip_ratio: 0.2
+  entropy_bonus: 0.003
+  gamma: 0.99
+  gae_lambda: 0.95
+  critic_coef: 1.0
+  loss_agg_func: "token-mean"

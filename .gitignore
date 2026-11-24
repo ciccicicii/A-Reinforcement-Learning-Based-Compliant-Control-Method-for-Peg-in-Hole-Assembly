@@ -1,0 +1,29 @@
+# ---- 第三方源码：独立仓库，按教程自行 clone ----
+# IsaacLab 是官方仓库的 v2.3.0 副本（自带 .git，约 87 MB），
+# 复现方式见 依赖安装与排错记录.md，不纳入本仓库版本管理。
+IsaacLab/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+env/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# ---- Isaac Sim 运行时产物（体积大且可重新生成） ----
+*.log
+*.usd
+*.usda
+wandb/
+runs/
+*.pt
+*.pth
+*.pkl
+
+# ---- 注意：outputs/ 下的实验 CSV 与 _config.json 是实验记录，必须保留，不要忽略 ----

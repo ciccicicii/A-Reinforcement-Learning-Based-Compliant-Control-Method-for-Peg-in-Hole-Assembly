@@ -1,0 +1,2 @@
+episode,status,steps,init_xy_err,init_z,final_xy_err,final_z,max_force,force_limit
+0,FAIL,148,0.02431,0.04833,0.00696,0.048,0.163,8.977
