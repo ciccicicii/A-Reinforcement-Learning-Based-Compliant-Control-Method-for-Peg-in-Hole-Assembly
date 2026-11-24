@@ -321,6 +321,7 @@ def main():
 
             # 边界守卫：环境在窗口内自动复位（force_threshold 只在复位时重抽）。
             # 延长时限后不应发生；若发生，说明本次试验混入了多个初始条件，必须作废该回合。
+            note = ""
             if abs(f_thresh - f_thresh_prev) > 1e-6:
                 boundary_violations += 1
                 note = "boundary_violation"
