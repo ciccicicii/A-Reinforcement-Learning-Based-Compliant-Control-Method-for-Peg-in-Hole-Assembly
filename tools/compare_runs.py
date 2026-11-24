@@ -128,17 +128,40 @@ def main():
     a, b = load(args.csv_a), load(args.csv_b)
 
     # ---------- 1. 配置与配对性检查 ----------
+    refuse = []
     print("=" * 68)
     print("配置快照")
+    cfgs = {}
     for tag, path in (("A", args.csv_a), ("B", args.csv_b)):
-        cfg = path.replace(".csv", "_config.json")
-        if os.path.exists(cfg):
-            with open(cfg) as f:
-                j = json.load(f)
-            cli = j.get("cli", {})
-            print(f"  {tag}: SHA={j.get('script_sha256_16')}  episodes={cli.get('episodes')} seed={cli.get('seed')}")
+        cfg_path = path.replace(".csv", "_config.json")
+        if os.path.exists(cfg_path):
+            with open(cfg_path) as f:
+                cfgs[tag] = json.load(f)
+            cli = cfgs[tag].get("cli", {})
+            print(f"  {tag}: SHA={cfgs[tag].get('script_sha256_16')}  episodes={cli.get('episodes')} seed={cli.get('seed')}")
         else:
             print(f"  {tag}: 无配置快照")
+            refuse.append("缺少配置快照，无法归因")
+
+    if len(cfgs) == 2:
+        sha_a, sha_b = cfgs["A"].get("script_sha256_16"), cfgs["B"].get("script_sha256_16")
+        if sha_a != sha_b:
+            refuse.append(f"脚本 SHA 不同（{sha_a} vs {sha_b}），不是同一份代码")
+        cli_a, cli_b = cfgs["A"].get("cli", {}), cfgs["B"].get("cli", {})
+        ignore = {"csv"}  # 输出路径差异不算实验变量
+        diffs = {k: (cli_a.get(k), cli_b.get(k)) for k in set(cli_a) | set(cli_b)
+                 if cli_a.get(k) != cli_b.get(k) and k not in ignore}
+        print(f"  CLI 差异（忽略输出路径）：{diffs if diffs else '无'}")
+        if len(diffs) > 1:
+            refuse.append(f"配置差异不止一项（{len(diffs)} 项），不构成单因素对照")
+
+    # 回合集合完整性
+    if len(a) != len(b):
+        refuse.append(f"回合数不同（{len(a)} vs {len(b)}）")
+    miss_a = sorted(set(b) - set(a))
+    miss_b = sorted(set(a) - set(b))
+    if miss_a or miss_b:
+        refuse.append(f"回合缺失：A 缺 {miss_a}，B 缺 {miss_b}")
 
     # ---------- 1b. 回合边界检查 ----------
     bad_a, bad_b = boundary_violations(a), boundary_violations(b)
@@ -150,17 +173,30 @@ def main():
         print(f"  A 受影响回合：{bad_a[:10]}{' ...' if len(bad_a) > 10 else ''}")
         print(f"  B 受影响回合：{bad_b[:10]}{' ...' if len(bad_b) > 10 else ''}")
         print("  修复：脚本默认延长 episode_length_s（非 --keep_official_limit），需重跑两轮。")
+        refuse.append("存在回合边界异常（窗口内自动复位）")
     else:
         print("  ✔ 两轮均为单一初始条件的连续试验。")
 
     common = sorted(set(a) & set(b))
-    unpaired = [ep for ep in common if any(abs(x - y) > args.tol for x, y in zip(init_state(a[ep]), init_state(b[ep])))]
+    fp_a = (cfgs.get("A") or {}).get("reset_fingerprints")
+    fp_b = (cfgs.get("B") or {}).get("reset_fingerprints")
+    unpaired = []
+    if fp_a and fp_b and len(fp_a) >= len(a) and len(fp_b) >= len(b):
+        # 完整指纹比对（销/孔/末端真值、力阈值、增益、EMA、死区）
+        unpaired = [ep for ep in common if fp_a[ep] != fp_b[ep]]
+        mode = "完整指纹"
+    else:
+        # 退化为首步观测比对
+        unpaired = [ep for ep in common
+                    if any(abs(x - y) > args.tol for x, y in zip(init_state(a[ep]), init_state(b[ep])))]
+        mode = "首步观测（无指纹快照）"
     print("-" * 68)
-    print(f"配对性检查：共同回合 {len(common)}，初态不一致 {len(unpaired)}")
+    print(f"配对性检查（{mode}）：共同回合 {len(common)}，初态不一致 {len(unpaired)}")
     if unpaired:
         print("  ⚠ 本轮比较不是配对比较——跨轮差异混入了初始条件差异。")
         print(f"  不一致回合：{unpaired[:10]}{' ...' if len(unpaired) > 10 else ''}")
         print("  修复方式：脚本开启逐回合重播种（默认 env.seed(seed*1000+ep)），再重跑两轮。")
+        refuse.append("初态不一致，非配对比较")
     else:
         print("  ✔ 所有共同回合初态一致，可做配对比较。")
 
@@ -208,7 +244,18 @@ def main():
             print(f"非配对 Fisher 精确检验（{sa['success']}/{sa['n']} vs {sb['success']}/{sb['n']}）：p≈{p:.3f}")
             print("  注：非配对比较的统计功效低（各 30 回合），差异不可直接归因于参数。")
 
+    # ---------- 4. 结论闸门 ----------
     print("=" * 68)
+    if refuse:
+        print("结论：⛔ 拒绝给出比较结论。原因：")
+        for i, r in enumerate(refuse, 1):
+            print(f"  {i}. {r}")
+        print("=" * 68)
+        return 1
+    print("结论：✔ 检查全部通过，上述数字可作为单因素配对对照使用。")
+    print("      仍需注意：单种子 pilot，正式结论需 ≥3 种子 × ≥30 回合。")
+    print("=" * 68)
+    return 0
 
 
 if __name__ == "__main__":

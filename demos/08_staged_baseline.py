@@ -176,6 +176,7 @@ def main():
 
     rows = []
     summary = []
+    fingerprints = []  # 每回合一个完整复位指纹，写入 config json
 
     for ep in range(args_cli.episodes):
         # 逐回合重播种：保证同回合号在不同配置下获得相同初始位姿（配对比较的前提）。
@@ -195,10 +196,30 @@ def main():
         boundary_violations = 0
         f_xyz = torch.zeros(3, device=rel.device)  # 上一步力（首步为零)
 
-        # 复位指纹：该回合唯一的初始条件标识（审查要求的"场景指纹"最小集）
+        # 复位指纹（审查要求）：覆盖销/孔/末端真实位姿、力阈值、增益、EMA 与死区，
+        # 以及 episode_length_buf（应为 0，非 0 即说明开局即跨复位）。
+        fingerprint = {
+            "seed": ep_seed,
+            "held_pos": [round(v, 5) for v in unwrapped.held_pos[0].tolist()],
+            "fixed_pos": [round(v, 5) for v in unwrapped.fixed_pos[0].tolist()],
+            "fingertip_pos": [round(v, 5) for v in unwrapped.fingertip_midpoint_pos[0].tolist()],
+            "force_threshold": round(f_thresh, 5),
+            "task_prop_gains": [round(v, 2) for v in unwrapped.task_prop_gains[0].tolist()],
+            "ema_factor": round(float(unwrapped.ema_factor), 5),
+            "dead_zone": (
+                [round(v, 3) for v in unwrapped.dead_zone_thresholds[0].tolist()]
+                if unwrapped.dead_zone_thresholds is not None
+                else None
+            ),
+            "episode_length_buf": int(unwrapped.episode_length_buf[0]),
+        }
+        fingerprints.append(fingerprint)
+        # CSV 内只留紧凑字符串，完整指纹写入 config json
         reset_fingerprint = (
-            f"seed={ep_seed}|thr={f_thresh:.4f}|"
-            f"init=({rel[0].item():+.4f},{rel[1].item():+.4f},{rel[2].item():+.4f})"
+            f"seed={ep_seed}|thr={f_thresh:.4f}|held=({fingerprint['held_pos'][0]:+.4f},"
+            f"{fingerprint['held_pos'][1]:+.4f},{fingerprint['held_pos'][2]:+.4f})|"
+            f"fixed=({fingerprint['fixed_pos'][0]:+.4f},{fingerprint['fixed_pos'][1]:+.4f})|"
+            f"buf={fingerprint['episode_length_buf']}"
         )
 
         rows_ep_start = len(rows)  # 本回合在 rows 中的起点，用于统计步数
@@ -303,6 +324,11 @@ def main():
             tgt_z = z_cmd
 
             # ============ 3. 记录并下发 ============
+            # 步进前先取一次成功判据：若本步触发环境 done，复位后状态不可信，
+            # 用步进前（即复位前）的值作为终态判据（审查要求"自动复位前保存终态判据"）。
+            success_pre = bool(
+                unwrapped._get_curr_successes(success_threshold=success_threshold, check_rot=False)[0]
+            )
             action = make_action(
                 torch.tensor([tgt_x, tgt_y, tgt_z], device=rel.device), prev_actions
             )
@@ -331,8 +357,9 @@ def main():
             if not note:
                 if is_done:
                     # 环境到点（不应发生，除非 --keep_official_limit）：观测已被复位，
-                    # 成功标志不可信，如实标记为 ENV_DONE 并终止本回合。
-                    status, note = "ENV_DONE", "env_done"
+                    # 用复位前的终态判据（success_pre）判定，并如实标记 ENV_DONE。
+                    status = "SUCCESS" if success_pre else "ENV_DONE"
+                    note = "success_at_env_done" if success_pre else "env_done"
                 elif success := bool(
                     unwrapped._get_curr_successes(success_threshold=success_threshold, check_rot=False)[0]
                 ):
@@ -356,6 +383,7 @@ def main():
                     "applied_z": round(applied[2].item(), 5),
                     "xy_err": round(xy_err, 6), "z_cmd": round(z_cmd, 6),
                     "spiral_r": round(spiral_r, 6), "neg_fz_events": neg_fz_events,
+                    "done": int(is_done),
                     "reset_fp": reset_fingerprint,
                     "note": note,
                 }
@@ -419,6 +447,7 @@ def main():
         + ("  ⚠ 存在跨复位试验，结果不可用于比较" if n_bad else "  ✔ 每次试验均为单一初始条件")
     )
     run_config["episode_length_s"] = env_cfg.episode_length_s
+    run_config["reset_fingerprints"] = fingerprints
     run_config["control_dt_s"] = control_dt
     run_config["max_episode_length_steps"] = max_ep_len
 
