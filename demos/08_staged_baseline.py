@@ -49,6 +49,16 @@ parser.add_argument("--max_steps", type=int, default=600, help="Max control step
 parser.add_argument("--neg_fz_alert", type=float, default=-0.5, help="Count F_z below this [N] as a physical anomaly (sensor noise is ~-0.16 N max).")
 parser.add_argument("--c_enable", action="store_true", help="Enable Phase-C (default OFF: spiral-only C was 0/7 with 3 aborts in the 30-episode run).")
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
+parser.add_argument(
+    "--no_reseed",
+    action="store_true",
+    default=False,
+    help=(
+        "关闭逐回合重播种（默认开启）。默认行为：每回合 reset 前调用 "
+        "env.seed(seed*1000+ep)，保证不同配置下同一回合号的初始位姿一致，"
+        "从而实现配对比较。关闭后复现旧的连续随机流行为（同种子≠同初态）。"
+    ),
+)
 # 阶段 A
 parser.add_argument("--xy_tol", type=float, default=0.002, help="Phase-A tolerance [m].")
 parser.add_argument("--hold_steps", type=int, default=10, help="Consecutive in-tolerance steps to enter B.")
@@ -143,6 +153,14 @@ def main():
     summary = []
 
     for ep in range(args_cli.episodes):
+        # 逐回合重播种：保证同回合号在不同配置下获得相同初始位姿（配对比较的前提）。
+        # 不重播种时，interval 事件（死区每 2 s 重随机）消耗的随机数随回合长度变化，
+        # 会导致下一回合初态漂移——实测两轮同种子下 29/30 回合初态不同。
+        ep_seed = args_cli.seed * 1000 + ep
+        if not args_cli.no_reseed:
+            unwrapped.seed(ep_seed)
+        else:
+            ep_seed = -1
         obs, _ = env.reset()
         policy_obs = obs["policy"][0]
         rel = policy_obs[SL_REL].clone()
@@ -274,7 +292,7 @@ def main():
 
             rows.append(
                 {
-                    "seed": args_cli.seed, "episode": ep, "step": step, "phase": phase,
+                    "seed": args_cli.seed, "episode": ep, "ep_seed": ep_seed, "step": step, "phase": phase,
                     "obs_x": round(rel[0].item(), 6), "obs_y": round(rel[1].item(), 6),
                     "obs_z": round(rel[2].item(), 6),
                     "base_x": round(base_x, 6), "base_y": round(base_y, 6),
